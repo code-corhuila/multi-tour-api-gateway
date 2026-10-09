@@ -16,9 +16,9 @@ TMP=$(mktemp -d) || exit 1
 fail=0
 
 cleanup() {
-  docker rm -f "$RUN_ID" >/dev/null 2>&1 || true
+  docker rm -f "$RUN_ID" "$RUN_ID-stub" >/dev/null 2>&1 || true
   docker network rm "$RUN_ID" >/dev/null 2>&1 || true
-  docker rmi "$RUN_ID" >/dev/null 2>&1 || true
+  docker rmi "$RUN_ID" "$RUN_ID-stub" >/dev/null 2>&1 || true
   rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -61,6 +61,10 @@ else
 fi
 
 docker network create "$RUN_ID" >/dev/null || exit 1
+# One domain is up (the stub answers as multi-tour-security) and the others are stopped: a stopped
+# service must answer 503 while the one that is up keeps working (norm §5.6.3).
+docker build -q -t "$RUN_ID-stub" tests/stub >/dev/null || { echo "the stub service did not build"; exit 1; }
+docker run -d --name "$RUN_ID-stub" --network "$RUN_ID" --network-alias multi-tour-security "$RUN_ID-stub" >/dev/null || exit 1
 docker run -d --name "$RUN_ID" --network "$RUN_ID" -e ALLOWED_ORIGIN="$ORIGIN" -p 127.0.0.1::8080 "$RUN_ID" >/dev/null || exit 1
 PORT=$(docker port "$RUN_ID" 8080/tcp | head -n 1 | sed 's/.*://')
 BASE="http://127.0.0.1:$PORT"
@@ -96,6 +100,42 @@ command -v cygpath >/dev/null 2>&1 && LARGE=$(cygpath -m "$LARGE")
 status "smoke·body_over_limit_is_413" 413 -X POST --data-binary "@$LARGE" "$BASE/nope"
 has    "smoke·the_413_carries_the_headers" 'Cache-Control: no-store' -X POST --data-binary "@$LARGE" "$BASE/nope"
 has    "smoke·body_over_limit_uses_the_envelope" '"error":"PAYLOAD_TOO_LARGE"' -X POST --data-binary "@$LARGE" "$BASE/nope"
+
+# ---- the routes (T-04)
+AUTH='Authorization: Bearer smoke'
+UP="$BASE/api/v1/security/accounts"
+DOWN="$BASE/api/v1/identity-audit/tenants"
+status "smoke·protected_route_without_token_is_401" 401 "$DOWN"
+has    "smoke·the_401_uses_the_envelope" '"error":"UNAUTHORIZED"' "$DOWN"
+has    "smoke·the_401_carries_the_headers" 'Cache-Control: no-store' "$DOWN"
+status "smoke·a_credential_is_enough_to_reach_the_service" 200 -H "$AUTH" "$UP"
+status "smoke·public_route_passes_without_token" 200 "$BASE/api/v1/security/public/tenants/acme/sign-in"
+status "smoke·stopped_service_is_503" 503 -H "$AUTH" "$DOWN"
+has    "smoke·the_503_uses_the_envelope" '"error":"SERVICE_UNAVAILABLE"' -H "$AUTH" "$DOWN"
+status "smoke·the_others_keep_working_while_one_is_stopped" 200 -H "$AUTH" "$UP"
+for domain in commercial-reservation operations-cost cash-reporting; do
+  status "smoke·${domain}_is_routed" 503 -H "$AUTH" "$BASE/api/v1/$domain/anything"
+done
+for saga in onboard-tenant register-payment execute-refund cancel-departure change-departure-vehicles; do
+  status "smoke·saga_${saga}_needs_a_credential" 401 -X POST "$BASE/api/v1/sagas/$saga"
+  status "smoke·saga_${saga}_is_routed" 503 -X POST -H "$AUTH" "$BASE/api/v1/sagas/$saga"
+done
+status "smoke·internal_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/internal/anything"
+status "smoke·internal_with_a_path_parameter_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/internal;x=1/anything"
+status "smoke·internal_in_capitals_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/INTERNAL/anything"
+has    "smoke·correlation_reaches_the_service" '"correlation":"smoke-2"' -H "$AUTH" -H 'X-Correlation-Id: smoke-2' "$UP"
+lacks  "smoke·a_forged_forwarded_for_is_not_passed_on" '6.6.6.6' -H "$AUTH" -H 'X-Forwarded-For: 6.6.6.6' "$UP"
+lacks  "smoke·the_correlation_header_of_the_service_is_hidden" 'from-the-service' -H "$AUTH" "$UP"
+lacks  "smoke·the_cache_header_of_the_service_is_hidden" 'Cache-Control: public' -H "$AUTH" "$UP"
+# the credential routes take the stricter zone: 60 per minute, burst 20, so the 40th request in a row is limited
+SIGN_IN="$BASE/api/v1/security/public/tenants/acme/sign-in"
+limited=0
+for _ in $(seq 1 40); do
+  [ "$(curl -s -o /dev/null -w '%{http_code}' "$SIGN_IN")" = 429 ] && limited=$((limited + 1))
+done
+if [ "$limited" -ge 1 ]; then pass "smoke·rate_limit_is_429"; else miss "smoke·rate_limit_is_429" "40 requests in a row were never limited"; fi
+has    "smoke·the_429_has_retry_after" 'Retry-After: 60' "$SIGN_IN"
+has    "smoke·the_429_uses_the_envelope" '"error":"TOO_MANY_REQUESTS"' "$SIGN_IN"
 
 [ "$fail" = 0 ] && echo "ALL CHECKS PASSED" || echo "SOME CHECKS FAILED"
 exit "$fail"
