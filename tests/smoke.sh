@@ -82,8 +82,11 @@ status "smoke·internal_is_404" 404 "$BASE/api/v1/security/internal/anything" -H
 has    "smoke·every_response_carries_the_security_headers" 'X-Content-Type-Options: nosniff' "$BASE/health"
 has    "smoke·every_response_is_not_cached" 'Cache-Control: no-store' "$BASE/health"
 head -c 1500000 /dev/zero > "$TMP/large.bin"
-status "smoke·body_over_limit_is_413" 413 -X POST --data-binary "@$TMP/large.bin" "$BASE/nope"
-has    "smoke·body_over_limit_uses_the_envelope" '"error":"PAYLOAD_TOO_LARGE"' -X POST --data-binary "@$TMP/large.bin" "$BASE/nope"
+# the native curl of Windows needs a Windows path for the file; elsewhere cygpath does not exist
+LARGE="$TMP/large.bin"
+command -v cygpath >/dev/null 2>&1 && LARGE=$(cygpath -m "$LARGE")
+status "smoke·body_over_limit_is_413" 413 -X POST --data-binary "@$LARGE" "$BASE/nope"
+has    "smoke·body_over_limit_uses_the_envelope" '"error":"PAYLOAD_TOO_LARGE"' -X POST --data-binary "@$LARGE" "$BASE/nope"
 
 [ "$fail" = 0 ] && echo "ALL CHECKS PASSED" || echo "SOME CHECKS FAILED"
 exit "$fail"
