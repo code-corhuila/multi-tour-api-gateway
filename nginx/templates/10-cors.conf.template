@@ -1,0 +1,6 @@
+# CORS: only the origin of the container multi-tour-front, never '*' together with credentials
+# (norm §5.6.4). The image entrypoint renders ${ALLOWED_ORIGIN} from the environment.
+map $http_origin $cors_origin {
+    default             "";
+    "${ALLOWED_ORIGIN}" $http_origin;
+}
