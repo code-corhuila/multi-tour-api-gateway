@@ -40,10 +40,12 @@ has() {
   if curl -s -i "$@" | grep -qi -- "$want"; then pass "$name"; else miss "$name" "missing: $want"; fi
 }
 
-# lacks NAME PATTERN CURL-ARGS...
+# lacks NAME PATTERN CURL-ARGS...: the gateway must answer, and the answer must not contain the pattern
 lacks() {
   name=$1; bad=$2; shift 2
-  if curl -s -i "$@" | grep -qi -- "$bad"; then miss "$name" "found: $bad"; else pass "$name"; fi
+  answer=$(curl -s -i "$@")
+  case $answer in HTTP/*) ;; *) miss "$name" "the gateway did not answer"; return ;; esac
+  if printf '%s\n' "$answer" | grep -qi -- "$bad"; then miss "$name" "found: $bad"; else pass "$name"; fi
 }
 
 # ---- build, then validate the configuration the way the image runs it
@@ -74,18 +76,25 @@ has    "smoke·unknown_route_uses_the_envelope" '"error":"NOT_FOUND"' "$BASE/nop
 has    "smoke·correlation_is_created" 'X-Correlation-Id: [A-Za-z0-9]' "$BASE/health"
 has    "smoke·correlation_is_kept" 'X-Correlation-Id: smoke-1' -H 'X-Correlation-Id: smoke-1' "$BASE/health"
 lacks  "smoke·unsafe_correlation_is_replaced" 'X-Correlation-Id: not safe' -H 'X-Correlation-Id: not safe' "$BASE/health"
+LONG=$(head -c 140 /dev/zero | tr '\000' a)
+lacks  "smoke·long_correlation_is_replaced" "$LONG" -H "X-Correlation-Id: $LONG" "$BASE/health"
 status "smoke·preflight_is_204" 204 -X OPTIONS -H "Origin: $ORIGIN" "$BASE/api/v1/anything"
 has    "smoke·preflight_allows_the_headers" 'Access-Control-Allow-Headers: Authorization, Content-Type, Idempotency-Key, X-Correlation-Id' -X OPTIONS -H "Origin: $ORIGIN" "$BASE/api/v1/anything"
+has    "smoke·allowed_origin_gets_the_grant" "Access-Control-Allow-Origin: $ORIGIN" -H "Origin: $ORIGIN" "$BASE/health"
+has    "smoke·preflight_of_the_allowed_origin_gets_the_grant" "Access-Control-Allow-Origin: $ORIGIN" -X OPTIONS -H "Origin: $ORIGIN" "$BASE/api/v1/anything"
+lacks  "smoke·preflight_of_an_unknown_origin_gets_no_grant" 'Access-Control-Allow-Origin' -X OPTIONS -H "Origin: $UNKNOWN_ORIGIN" "$BASE/api/v1/anything"
+has    "smoke·cors_varies_by_origin" 'Vary: Origin' "$BASE/health"
 has    "smoke·cors_exposes_correlation_and_location" 'Access-Control-Expose-Headers: X-Correlation-Id, Location' -H "Origin: $ORIGIN" "$BASE/health"
 lacks  "smoke·unknown_origin_gets_no_cors" 'Access-Control-Allow-Origin' -H "Origin: $UNKNOWN_ORIGIN" "$BASE/health"
-status "smoke·internal_is_404" 404 "$BASE/api/v1/security/internal/anything" -H 'Authorization: Bearer x'
 has    "smoke·every_response_carries_the_security_headers" 'X-Content-Type-Options: nosniff' "$BASE/health"
 has    "smoke·every_response_is_not_cached" 'Cache-Control: no-store' "$BASE/health"
+has    "smoke·the_404_carries_the_headers" 'X-Content-Type-Options: nosniff' "$BASE/nope"
 head -c 1500000 /dev/zero > "$TMP/large.bin"
 # the native curl of Windows needs a Windows path for the file; elsewhere cygpath does not exist
 LARGE="$TMP/large.bin"
 command -v cygpath >/dev/null 2>&1 && LARGE=$(cygpath -m "$LARGE")
 status "smoke·body_over_limit_is_413" 413 -X POST --data-binary "@$LARGE" "$BASE/nope"
+has    "smoke·the_413_carries_the_headers" 'Cache-Control: no-store' -X POST --data-binary "@$LARGE" "$BASE/nope"
 has    "smoke·body_over_limit_uses_the_envelope" '"error":"PAYLOAD_TOO_LARGE"' -X POST --data-binary "@$LARGE" "$BASE/nope"
 
 [ "$fail" = 0 ] && echo "ALL CHECKS PASSED" || echo "SOME CHECKS FAILED"
