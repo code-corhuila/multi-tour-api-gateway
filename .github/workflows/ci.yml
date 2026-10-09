@@ -1,0 +1,23 @@
+name: ci
+
+# Builds the image, validates the configuration with nginx -t and runs tests/smoke.sh against the
+# gateway. Pull requests toward develop and qa only, to save the course's automation minutes. No schedule.
+on:
+  pull_request:
+    branches: [develop, qa]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: nginx -t and smoke checks
+        run: sh tests/smoke.sh
