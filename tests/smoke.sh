@@ -16,7 +16,7 @@ TMP=$(mktemp -d) || exit 1
 fail=0
 
 cleanup() {
-  docker rm -f "$RUN_ID" "$RUN_ID-stub" >/dev/null 2>&1 || true
+  docker rm -f "$RUN_ID" "$RUN_ID-stub" "$RUN_ID-front" >/dev/null 2>&1 || true
   docker network rm "$RUN_ID" >/dev/null 2>&1 || true
   docker rmi "$RUN_ID" "$RUN_ID-stub" >/dev/null 2>&1 || true
   rm -rf "$TMP"
@@ -80,8 +80,8 @@ done
 
 # ---- the checks
 status "smoke·health_is_200" 200 "$BASE/health"
-status "smoke·unknown_route_is_404" 404 "$BASE/nope"
-has    "smoke·unknown_route_uses_the_envelope" '"error":"NOT_FOUND"' "$BASE/nope"
+status "smoke·unknown_route_is_404" 404 "$BASE/api/v1/nope"
+has    "smoke·unknown_route_uses_the_envelope" '"error":"NOT_FOUND"' "$BASE/api/v1/nope"
 has    "smoke·correlation_is_created" 'X-Correlation-Id: [A-Za-z0-9]' "$BASE/health"
 has    "smoke·correlation_is_kept" 'X-Correlation-Id: smoke-1' -H 'X-Correlation-Id: smoke-1' "$BASE/health"
 lacks  "smoke·unsafe_correlation_is_replaced" 'X-Correlation-Id: not safe' -H 'X-Correlation-Id: not safe' "$BASE/health"
@@ -97,14 +97,14 @@ has    "smoke·cors_exposes_correlation_and_location" 'Access-Control-Expose-Hea
 lacks  "smoke·unknown_origin_gets_no_cors" 'Access-Control-Allow-Origin' -H "Origin: $UNKNOWN_ORIGIN" "$BASE/health"
 has    "smoke·every_response_carries_the_security_headers" 'X-Content-Type-Options: nosniff' "$BASE/health"
 has    "smoke·every_response_is_not_cached" 'Cache-Control: no-store' "$BASE/health"
-has    "smoke·the_404_carries_the_headers" 'X-Content-Type-Options: nosniff' "$BASE/nope"
+has    "smoke·the_404_carries_the_headers" 'X-Content-Type-Options: nosniff' "$BASE/api/v1/nope"
 head -c 1500000 /dev/zero > "$TMP/large.bin"
 # the native curl of Windows needs a Windows path for the file; elsewhere cygpath does not exist
 LARGE="$TMP/large.bin"
 command -v cygpath >/dev/null 2>&1 && LARGE=$(cygpath -m "$LARGE")
-status "smoke·body_over_limit_is_413" 413 -X POST --data-binary "@$LARGE" "$BASE/nope"
-has    "smoke·the_413_carries_the_headers" 'Cache-Control: no-store' -X POST --data-binary "@$LARGE" "$BASE/nope"
-has    "smoke·body_over_limit_uses_the_envelope" '"error":"PAYLOAD_TOO_LARGE"' -X POST --data-binary "@$LARGE" "$BASE/nope"
+status "smoke·body_over_limit_is_413" 413 -X POST --data-binary "@$LARGE" "$BASE/api/v1/nope"
+has    "smoke·the_413_carries_the_headers" 'Cache-Control: no-store' -X POST --data-binary "@$LARGE" "$BASE/api/v1/nope"
+has    "smoke·body_over_limit_uses_the_envelope" '"error":"PAYLOAD_TOO_LARGE"' -X POST --data-binary "@$LARGE" "$BASE/api/v1/nope"
 
 # ---- the routes (T-04)
 AUTH='Authorization: Bearer smoke'
@@ -142,6 +142,29 @@ has    "smoke·correlation_reaches_the_service" '"correlation":"smoke-2"' -H "$A
 lacks  "smoke·a_forged_forwarded_for_is_not_passed_on" '6.6.6.6' -H "$AUTH" -H 'X-Forwarded-For: 6.6.6.6' "$UP"
 lacks  "smoke·the_correlation_header_of_the_service_is_hidden" 'from-the-service' -H "$AUTH" "$UP"
 lacks  "smoke·the_cache_header_of_the_service_is_hidden" 'Cache-Control: public' -H "$AUTH" "$UP"
+# ---- the front on the same origin (the browser reaches the shell and the API through one address)
+# The front is not started yet: the root answers the 503 envelope, with no credential asked.
+status "smoke·root_without_the_front_is_503" 503 "$BASE/"
+has    "smoke·the_root_503_uses_the_envelope" '"error":"SERVICE_UNAVAILABLE"' "$BASE/portals/identity-audit/remoteEntry.json"
+status "smoke·unknown_api_path_is_404_not_the_front" 404 -H "$AUTH" "$BASE/api/nope"
+status "smoke·api_without_token_is_still_401" 401 "$DOWN"
+# a saga may outlast the 70 s bound of the workflow, so its read timeout is 90 s
+for saga in onboard-tenant register-payment execute-refund cancel-departure change-departure-vehicles; do
+  t=$(awk -v s="$saga" 'index($0, "sagas/" s) && /location/ {f=1} f && /proxy_read_timeout/ {print $2; exit}' nginx/routes/sagas.conf)
+  if [ "$t" = "90s;" ]; then pass "smoke·saga_${saga}_waits_90s"; else miss "smoke·saga_${saga}_waits_90s" "found: $t"; fi
+done
+docker run -d --name "$RUN_ID-front" --network "$RUN_ID" --network-alias multi-tour-front "$RUN_ID-stub" >/dev/null || exit 1
+# above the 10 s the resolver keeps the failed lookup of the front (valid=10s)
+sleep 13
+status "smoke·root_reaches_the_front_without_token" 200 "$BASE/"
+has    "smoke·root_is_served_by_the_front_on_8080" '"port":"8080"' "$BASE/index.html"
+has    "smoke·the_manifest_keeps_the_cache_header_of_the_front" 'Cache-Control: no-cache' "$BASE/federation.manifest.json"
+lacks  "smoke·the_manifest_is_not_forced_to_no_store" 'Cache-Control: no-store' "$BASE/federation.manifest.json"
+has    "smoke·portals_keep_the_cache_header_of_the_front" 'Cache-Control: no-cache' "$BASE/portals/identity-audit/remoteEntry.json"
+has    "smoke·the_front_response_carries_one_correlation_id" 'X-Correlation-Id: [A-Za-z0-9]' "$BASE/"
+lacks  "smoke·the_cors_headers_of_the_front_are_hidden" 'Access-Control-Allow-Origin' "$BASE/portals/identity-audit/remoteEntry.json"
+lacks  "smoke·the_front_correlation_header_is_hidden" 'from-the-service' "$BASE/"
+
 # the credential routes take the stricter zone: 60 per minute, burst 20, so the 40th request in a row is limited
 SIGN_IN="$BASE/api/v1/security/public/tenants/acme/sign-in"
 limited=0; first=0; last=''
