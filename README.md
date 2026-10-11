@@ -20,8 +20,10 @@ Needs Docker. Copy `.env.example` to `.env` (never versioned) and set `ALLOWED_O
 | `/api/v1/<domain>/…` | `multi-tour-security:8086`, `multi-tour-identity-audit-api:8082`, `…-commercial-reservation-api:8083`, `…-operations-cost-api:8084`, `…-cash-reporting-api:8085` | `Authorization` header required, else `401` |
 | `/api/v1/sagas/<saga>…` | `multi-tour-workflow-<saga>:8090` | `Authorization` header required |
 | `/api/v1/<domain>/internal/…` | nowhere | always `404` (ADR-004 D5) |
+| `/api/…` with no route | nowhere | `404` envelope |
+| everything else (`/`, `/portals/…`, `federation.manifest.json`) | `multi-tour-front:8080` | no credential; the front sets the cache headers; `503` envelope if it is down |
 
-A service that is down answers `503` and the rest keep working. Limits: 1 MB body, 50 requests per second per client and 60 per minute on the credential routes of `security/public`.
+The browser reaches the page and the API through this one origin. A service that is down answers `503` and the rest keep working. Limits: 1 MB body, 50 requests per second per client and 60 per minute on the credential routes of `security/public`.
 
 ## Where the data is
 
