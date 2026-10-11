@@ -154,13 +154,15 @@ for saga in onboard-tenant register-payment execute-refund cancel-departure chan
   if [ "$t" = "90s;" ]; then pass "smoke·saga_${saga}_waits_90s"; else miss "smoke·saga_${saga}_waits_90s" "found: $t"; fi
 done
 docker run -d --name "$RUN_ID-front" --network "$RUN_ID" --network-alias multi-tour-front "$RUN_ID-stub" >/dev/null || exit 1
-sleep 11
+# above the 10 s the resolver keeps the failed lookup of the front (valid=10s)
+sleep 13
 status "smoke·root_reaches_the_front_without_token" 200 "$BASE/"
 has    "smoke·root_is_served_by_the_front_on_8080" '"port":"8080"' "$BASE/index.html"
 has    "smoke·the_manifest_keeps_the_cache_header_of_the_front" 'Cache-Control: no-cache' "$BASE/federation.manifest.json"
 lacks  "smoke·the_manifest_is_not_forced_to_no_store" 'Cache-Control: no-store' "$BASE/federation.manifest.json"
 has    "smoke·portals_keep_the_cache_header_of_the_front" 'Cache-Control: no-cache' "$BASE/portals/identity-audit/remoteEntry.json"
 has    "smoke·the_front_response_carries_one_correlation_id" 'X-Correlation-Id: [A-Za-z0-9]' "$BASE/"
+lacks  "smoke·the_cors_headers_of_the_front_are_hidden" 'Access-Control-Allow-Origin' "$BASE/portals/identity-audit/remoteEntry.json"
 lacks  "smoke·the_front_correlation_header_is_hidden" 'from-the-service' "$BASE/"
 
 # the credential routes take the stricter zone: 60 per minute, burst 20, so the 40th request in a row is limited
