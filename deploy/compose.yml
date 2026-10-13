@@ -1,0 +1,17 @@
+# The gateway: the only service of the platform that publishes a port besides Grafana (norm §5.6.1;
+# ADR-004 D8). Every other service uses `expose`. The root composition of multi-tour-infra-postgres
+# includes this file; the network `platform` is created by its scripts/up.sh.
+services:
+  api-gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      ALLOWED_ORIGIN: ${ALLOWED_ORIGIN:?ALLOWED_ORIGIN is required, set it in .env}
+    ports: ["8080:8080"]
+    networks: [platform]
+
+networks:
+  platform:
+    name: platform
+    external: true
