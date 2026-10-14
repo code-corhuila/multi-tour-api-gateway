@@ -146,6 +146,12 @@ lacks  "smoke·the_cache_header_of_the_service_is_hidden" 'Cache-Control: public
 # The front is not started yet: the root answers the 503 envelope, with no credential asked.
 status "smoke·root_without_the_front_is_503" 503 "$BASE/"
 has    "smoke·the_root_503_uses_the_envelope" '"error":"SERVICE_UNAVAILABLE"' "$BASE/portals/identity-audit/remoteEntry.json"
+# A portal that is not running answers the 503 envelope on its own module, with no credential asked, and
+# the other routes keep answering (the area of that portal is the only one that goes down).
+for p in identity-audit operations-cost commercial-reservation; do
+  status "smoke·portal_${p}_module_down_is_503" 503 "$BASE/portals/${p}-portal.js"
+  has    "smoke·portal_${p}_503_uses_the_envelope" '"error":"SERVICE_UNAVAILABLE"' "$BASE/portals/${p}-portal.css"
+done
 status "smoke·unknown_api_path_is_404_not_the_front" 404 -H "$AUTH" "$BASE/api/nope"
 status "smoke·api_without_token_is_still_401" 401 "$DOWN"
 # a saga may outlast the 70 s bound of the workflow, so its read timeout is 90 s
