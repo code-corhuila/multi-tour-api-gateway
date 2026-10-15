@@ -148,9 +148,13 @@ status "smoke·root_without_the_front_is_503" 503 "$BASE/"
 has    "smoke·the_root_503_uses_the_envelope" '"error":"SERVICE_UNAVAILABLE"' "$BASE/portals/identity-audit/remoteEntry.json"
 # A portal that is not running answers the 503 envelope on its own module, with no credential asked, and
 # the other routes keep answering (the area of that portal is the only one that goes down).
-for p in identity-audit operations-cost commercial-reservation; do
+for p in identity-audit operations-cost commercial-reservation cash-reporting; do
   status "smoke·portal_${p}_module_down_is_503" 503 "$BASE/portals/${p}-portal.js"
   has    "smoke·portal_${p}_503_uses_the_envelope" '"error":"SERVICE_UNAVAILABLE"' "$BASE/portals/${p}-portal.css"
+done
+# every portal has its own route file that points at its own container (a portal missing here would be served by the front and answer 404 once it runs)
+for p in identity-audit operations-cost commercial-reservation cash-reporting; do
+  if grep -q "http://[a-z-]*-portal:" "nginx/routes/portal-${p}.conf" 2>/dev/null; then pass "smoke·portal_${p}_has_its_own_route"; else miss "smoke·portal_${p}_has_its_own_route" "nginx/routes/portal-${p}.conf"; fi
 done
 status "smoke·unknown_api_path_is_404_not_the_front" 404 -H "$AUTH" "$BASE/api/nope"
 status "smoke·api_without_token_is_still_401" 401 "$DOWN"
