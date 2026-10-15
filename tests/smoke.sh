@@ -156,6 +156,11 @@ done
 for p in identity-audit operations-cost commercial-reservation cash-reporting; do
   if grep -q "http://[a-z-]*-portal:" "nginx/routes/portal-${p}.conf" 2>/dev/null; then pass "smoke·portal_${p}_has_its_own_route"; else miss "smoke·portal_${p}_has_its_own_route" "nginx/routes/portal-${p}.conf"; fi
 done
+# the module of each portal is asked as /portals/<portal>.{js,css} and each container serves it under its own name: a route without a
+# rewrite sends the path unchanged and the container answers its welcome page with 200 (the front then fails to import it)
+for p in identity-audit operations-cost commercial-reservation cash-reporting; do
+  if grep -q "rewrite " "nginx/routes/portal-${p}.conf" 2>/dev/null; then pass "smoke·portal_${p}_rewrites_the_module_path"; else miss "smoke·portal_${p}_rewrites_the_module_path" "nginx/routes/portal-${p}.conf"; fi
+done
 status "smoke·unknown_api_path_is_404_not_the_front" 404 -H "$AUTH" "$BASE/api/nope"
 status "smoke·api_without_token_is_still_401" 401 "$DOWN"
 # a saga may outlast the 70 s bound of the workflow, so its read timeout is 90 s
