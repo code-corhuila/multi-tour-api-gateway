@@ -132,6 +132,25 @@ for saga in onboard-tenant register-payment execute-refund cancel-departure chan
   status "smoke·saga_${saga}_needs_a_credential" 401 -X POST "$BASE/api/v1/sagas/$saga"
   status "smoke·saga_${saga}_is_routed" 503 -X POST -H "$AUTH" "$BASE/api/v1/sagas/$saga"
 done
+# HU-COM-002 / HU-COM-006: the promotional image of an association is public and cacheable, never no-store
+# (ADR-005 E6; contract commercial-reservation.yaml). The stub sends `Cache-Control: public`, as the service does.
+CR="$BASE/api/v1/commercial-reservation"
+IMG="$CR/public/tenants/acme/associated-establishments/a1/image"
+status "smoke·public_association_image_passes_without_token" 200 "$IMG"
+has    "smoke·public_association_image_keeps_the_cache_header_of_the_service" 'Cache-Control: public' "$IMG"
+lacks  "smoke·public_association_image_is_not_no_store" 'no-store' "$IMG"
+has    "smoke·public_association_image_keeps_the_security_headers" 'X-Content-Type-Options: nosniff' "$IMG"
+has    "smoke·public_association_image_keeps_the_correlation_id" 'X-Correlation-Id: [A-Za-z0-9]' "$IMG"
+lacks  "smoke·public_association_image_does_not_repeat_the_service_correlation_id" 'from-the-service' "$IMG"
+# only that route is the exception: the other public reads and look-alike paths keep no-store
+has    "smoke·other_public_reads_stay_no_store" 'Cache-Control: no-store' "$CR/public/tenants/acme/tours"
+has    "smoke·a_look_alike_image_path_stays_no_store" 'Cache-Control: no-store' "$CR/public/tenants/acme/associated-establishments/a1/image/extra"
+has    "smoke·an_image_name_on_another_resource_stays_no_store" 'Cache-Control: no-store' "$CR/public/tenants/acme/tours/t1/image"
+# the upload of an image (800 KB, HU-COM-002 RNF-03) fits the 1 MB body limit of the gateway
+head -c 819200 /dev/zero > "$TMP/image.bin"
+IMAGE="$TMP/image.bin"
+command -v cygpath >/dev/null 2>&1 && IMAGE=$(cygpath -m "$IMAGE")
+status "smoke·an_800kb_image_upload_is_accepted" 200 -X POST -H "$AUTH" -H 'Content-Type: application/octet-stream' --data-binary "@$IMAGE" "$CR/associated-establishments"
 status "smoke·internal_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/internal/anything"
 status "smoke·internal_with_a_path_parameter_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/internal;x=1/anything"
 status "smoke·internal_in_capitals_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/INTERNAL/anything"
