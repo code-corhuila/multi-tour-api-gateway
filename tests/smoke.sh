@@ -164,10 +164,13 @@ done
 status "smoke·unknown_api_path_is_404_not_the_front" 404 -H "$AUTH" "$BASE/api/nope"
 status "smoke·api_without_token_is_still_401" 401 "$DOWN"
 # a saga may outlast the 70 s bound of the workflow, so its read timeout is 90 s
-for saga in onboard-tenant register-payment execute-refund cancel-departure change-departure-vehicles; do
+for saga in onboard-tenant register-payment execute-refund cancel-departure; do
   t=$(awk -v s="$saga" 'index($0, "sagas/" s) && /location/ {f=1} f && /proxy_read_timeout/ {print $2; exit}' nginx/routes/sagas.conf)
   if [ "$t" = "90s;" ]; then pass "smoke·saga_${saga}_waits_90s"; else miss "smoke·saga_${saga}_waits_90s" "found: $t"; fi
 done
+# the saga of the vehicles runs up to 130 s inside the request (HU-WFL-005), so it waits 150 s
+t=$(awk 'index($0, "sagas/change-departure-vehicles") && /location/ {f=1} f && /proxy_read_timeout/ {print $2; exit}' nginx/routes/sagas.conf)
+if [ "$t" = "150s;" ]; then pass "smoke·saga_change-departure-vehicles_waits_150s"; else miss "smoke·saga_change-departure-vehicles_waits_150s" "found: $t"; fi
 docker run -d --name "$RUN_ID-front" --network "$RUN_ID" --network-alias multi-tour-front "$RUN_ID-stub" >/dev/null || exit 1
 # above the 10 s the resolver keeps the failed lookup of the front (valid=10s)
 sleep 13
