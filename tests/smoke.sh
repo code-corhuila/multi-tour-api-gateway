@@ -132,6 +132,49 @@ for saga in onboard-tenant register-payment execute-refund cancel-departure chan
   status "smoke·saga_${saga}_needs_a_credential" 401 -X POST "$BASE/api/v1/sagas/$saga"
   status "smoke·saga_${saga}_is_routed" 503 -X POST -H "$AUTH" "$BASE/api/v1/sagas/$saga"
 done
+# HU-COM-002 / HU-COM-006: the promotional image of an association is public and cacheable, never no-store
+# (ADR-005 E6; contract commercial-reservation.yaml). The stub sends `Cache-Control: public`, as the service does.
+CR="$BASE/api/v1/commercial-reservation"
+IMG="$CR/public/tenants/acme/associated-establishments/a1/image"
+status "smoke·public_association_image_passes_without_token" 200 "$IMG"
+has    "smoke·public_association_image_keeps_the_cache_header_of_the_service" 'Cache-Control: public' "$IMG"
+lacks  "smoke·public_association_image_is_not_no_store" 'no-store' "$IMG"
+has    "smoke·public_association_image_keeps_the_security_headers" 'X-Content-Type-Options: nosniff' "$IMG"
+has    "smoke·public_association_image_keeps_the_correlation_id" 'X-Correlation-Id: [A-Za-z0-9]' "$IMG"
+lacks  "smoke·public_association_image_does_not_repeat_the_service_correlation_id" 'from-the-service' "$IMG"
+# only that route is the exception: the other public reads and look-alike paths keep no-store
+has    "smoke·other_public_reads_stay_no_store" 'Cache-Control: no-store' "$CR/public/tenants/acme/tours"
+has    "smoke·a_look_alike_image_path_stays_no_store" 'Cache-Control: no-store' "$CR/public/tenants/acme/associated-establishments/a1/image/extra"
+has    "smoke·an_image_name_on_another_resource_stays_no_store" 'Cache-Control: no-store' "$CR/public/tenants/acme/tours/t1/image"
+# the upload of an image (800 KB, HU-COM-002 RNF-03) fits the 1 MB body limit of the gateway
+head -c 819200 /dev/zero > "$TMP/image.bin"
+IMAGE="$TMP/image.bin"
+command -v cygpath >/dev/null 2>&1 && IMAGE=$(cygpath -m "$IMAGE")
+status "smoke·an_800kb_image_upload_is_accepted" 200 -X POST -H "$AUTH" -H 'Content-Type: application/octet-stream' --data-binary "@$IMAGE" "$CR/associated-establishments"
+# HU-COM-009: the proof upload (one route) takes up to 6 MB; everywhere else the limit stays 1 MB (ADR-004 D10, ADR-005 E6)
+head -c 5242880 /dev/zero > "$TMP/proof5.bin"
+head -c 6400000 /dev/zero > "$TMP/proof7.bin"
+PROOF5="$TMP/proof5.bin"; PROOF7="$TMP/proof7.bin"
+command -v cygpath >/dev/null 2>&1 && { PROOF5=$(cygpath -m "$PROOF5"); PROOF7=$(cygpath -m "$PROOF7"); }
+CR="$BASE/api/v1/commercial-reservation"
+PAY="$CR/reservations/3f2a1c9e/payments"
+MP='Content-Type: multipart/form-data; boundary=smoke'
+status "smoke·proof_upload_of_5mb_is_forwarded" 200 -X POST -H "$AUTH" -H "$MP" -H 'Idempotency-Key: k-1' --data-binary "@$PROOF5" "$PAY"
+status "smoke·proof_upload_above_6mb_is_413" 413 -X POST -H "$AUTH" -H "$MP" --data-binary "@$PROOF7" "$PAY"
+has    "smoke·proof_upload_413_uses_the_envelope" '"error":"PAYLOAD_TOO_LARGE"' -X POST -H "$AUTH" -H "$MP" --data-binary "@$PROOF7" "$PAY"
+has    "smoke·proof_upload_413_carries_the_headers" 'Cache-Control: no-store' -X POST -H "$AUTH" -H "$MP" --data-binary "@$PROOF7" "$PAY"
+status "smoke·proof_upload_needs_a_credential" 401 -X POST -H "$MP" --data-binary "@$PROOF5" "$PAY"
+has    "smoke·proof_upload_carries_the_security_headers" 'X-Content-Type-Options: nosniff' -X POST -H "$AUTH" -H "$MP" --data-binary "@$PROOF5" "$PAY"
+has    "smoke·proof_upload_carries_the_cors_grant" "Access-Control-Allow-Origin: $ORIGIN" -X POST -H "Origin: $ORIGIN" -H "$AUTH" -H "$MP" --data-binary "@$PROOF5" "$PAY"
+has    "smoke·proof_upload_is_not_cached" 'Cache-Control: no-store' -X POST -H "$AUTH" -H "$MP" --data-binary "@$PROOF5" "$PAY"
+status "smoke·the_list_of_payments_still_works" 200 -H "$AUTH" "$PAY"
+status "smoke·5mb_on_the_reservations_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$CR/reservations"
+status "smoke·5mb_on_a_look_alike_path_with_a_segment_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$PAY/extra"
+status "smoke·5mb_on_a_payment_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$PAY/p1"
+status "smoke·5mb_on_a_nested_payments_path_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$CR/reservations/r1/x/payments"
+status "smoke·5mb_on_a_path_parameter_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$CR/reservations/r1;x=1/payments"
+status "smoke·5mb_on_a_payments_prefix_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$CR/reservations/r1/paymentsX"
+status "smoke·5mb_on_another_domain_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$BASE/api/v1/cash-reporting/reservations/r1/payments"
 status "smoke·internal_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/internal/anything"
 status "smoke·internal_with_a_path_parameter_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/internal;x=1/anything"
 status "smoke·internal_in_capitals_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/INTERNAL/anything"
