@@ -61,14 +61,15 @@ else
 fi
 
 docker network create "$RUN_ID" >/dev/null || exit 1
-# The stub answers as four domains, on their ports, and says which port was reached. identity-audit and
-# the sagas are stopped: a stopped service must answer 503 while the others keep working (norm §5.6.3).
+# The stub answers as five domains, on their ports, and says which port was reached. The sagas are stopped: a stopped service must
+# answer 503 while the others keep working (norm §5.6.3). identity-audit answers too, for the routes of the logo and the images.
 docker build -q -t "$RUN_ID-stub" tests/stub >/dev/null || { echo "the stub service did not build"; exit 1; }
 docker run -d --name "$RUN_ID-stub" --network "$RUN_ID" \
   --network-alias multi-tour-security \
   --network-alias multi-tour-commercial-reservation-api \
   --network-alias multi-tour-operations-cost-api \
   --network-alias multi-tour-cash-reporting-api \
+  --network-alias multi-tour-identity-audit-api \
   "$RUN_ID-stub" >/dev/null || exit 1
 docker run -d --name "$RUN_ID" --network "$RUN_ID" -e ALLOWED_ORIGIN="$ORIGIN" -p 127.0.0.1::8080 "$RUN_ID" >/dev/null || exit 1
 PORT=$(docker port "$RUN_ID" 8080/tcp | head -n 1 | sed 's/.*://')
@@ -109,7 +110,7 @@ has    "smoke·body_over_limit_uses_the_envelope" '"error":"PAYLOAD_TOO_LARGE"' 
 # ---- the routes (T-04)
 AUTH='Authorization: Bearer smoke'
 UP="$BASE/api/v1/security/accounts"
-DOWN="$BASE/api/v1/identity-audit/tenants"
+DOWN="$BASE/api/v1/sagas/onboard-tenant"
 status "smoke·protected_route_without_token_is_401" 401 "$DOWN"
 has    "smoke·the_401_uses_the_envelope" '"error":"UNAUTHORIZED"' "$DOWN"
 has    "smoke·the_401_carries_the_headers" 'Cache-Control: no-store' "$DOWN"
@@ -175,6 +176,39 @@ status "smoke·5mb_on_a_nested_payments_path_is_413" 413 -X POST -H "$AUTH" --da
 status "smoke·5mb_on_a_path_parameter_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$CR/reservations/r1;x=1/payments"
 status "smoke·5mb_on_a_payments_prefix_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$CR/reservations/r1/paymentsX"
 status "smoke·5mb_on_another_domain_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$BASE/api/v1/cash-reporting/reservations/r1/payments"
+# HU-IDA-005: the logo and the commercial images of a tenant. A file of 1 MB in base64 is about 1.4 MB of JSON, so the two routes that
+# receive one take up to 2 MB (the service itself refuses above 1.5 MB); everywhere else the limit stays 1 MB
+head -c 1572864 /dev/zero > "$TMP/file15.bin"
+head -c 2200000 /dev/zero > "$TMP/file22.bin"
+FILE15="$TMP/file15.bin"; FILE22="$TMP/file22.bin"
+command -v cygpath >/dev/null 2>&1 && { FILE15=$(cygpath -m "$FILE15"); FILE22=$(cygpath -m "$FILE22"); }
+IA="$BASE/api/v1/identity-audit"
+JSON='Content-Type: application/json'
+status "smoke·a_logo_body_of_1_5mb_is_forwarded" 200 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/logo"
+status "smoke·an_image_body_of_1_5mb_is_forwarded" 200 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/images/2"
+status "smoke·a_file_body_above_2mb_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE22" "$IA/tenant/images/2"
+has    "smoke·a_file_body_above_2mb_uses_the_envelope" '"error":"PAYLOAD_TOO_LARGE"' -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE22" "$IA/tenant/logo"
+status "smoke·the_file_route_needs_a_credential" 401 -X PUT -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/logo"
+has    "smoke·the_file_route_carries_the_security_headers" 'X-Content-Type-Options: nosniff' -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/logo"
+has    "smoke·the_file_route_carries_the_cors_grant" "Access-Control-Allow-Origin: $ORIGIN" -X PUT -H "Origin: $ORIGIN" -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/logo"
+status "smoke·1_5mb_on_another_tenant_route_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/visual-identity"
+status "smoke·1_5mb_on_a_logo_look_alike_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/logo/extra"
+status "smoke·1_5mb_on_an_image_with_a_name_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/images/x"
+status "smoke·1_5mb_on_an_image_with_a_segment_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/images/1/extra"
+status "smoke·1_5mb_on_an_image_with_a_path_parameter_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/images/1;x=1"
+status "smoke·1_5mb_on_another_domain_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$BASE/api/v1/operations-cost/tenant/logo"
+# the public files of a tenant are shown before sign-in and must be cacheable, never no-store (api spec 012, RN-IDA-API-125)
+LOGO="$IA/public/tenants/acme/logo"
+status "smoke·public_logo_passes_without_token" 200 "$LOGO"
+has    "smoke·public_logo_keeps_the_cache_header_of_the_service" 'Cache-Control: public' "$LOGO"
+lacks  "smoke·public_logo_is_not_no_store" 'no-store' "$LOGO"
+has    "smoke·public_logo_keeps_the_security_headers" 'X-Content-Type-Options: nosniff' "$LOGO"
+has    "smoke·public_image_keeps_the_cache_header_of_the_service" 'Cache-Control: public' "$IA/public/tenants/acme/images/1"
+lacks  "smoke·public_image_is_not_no_store" 'no-store' "$IA/public/tenants/acme/images/1"
+# only those two routes are the exception: the profile and look-alike paths keep no-store
+has    "smoke·the_public_profile_stays_no_store" 'Cache-Control: no-store' "$IA/public/tenants/acme"
+has    "smoke·a_look_alike_logo_path_stays_no_store" 'Cache-Control: no-store' "$IA/public/tenants/acme/logo/extra"
+has    "smoke·a_look_alike_image_path_stays_no_store" 'Cache-Control: no-store' "$IA/public/tenants/acme/images/1/extra"
 status "smoke·internal_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/internal/anything"
 status "smoke·internal_with_a_path_parameter_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/internal;x=1/anything"
 status "smoke·internal_in_capitals_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/INTERNAL/anything"
