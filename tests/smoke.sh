@@ -61,14 +61,15 @@ else
 fi
 
 docker network create "$RUN_ID" >/dev/null || exit 1
-# The stub answers as four domains, on their ports, and says which port was reached. identity-audit and
-# the sagas are stopped: a stopped service must answer 503 while the others keep working (norm §5.6.3).
+# The stub answers as five domains, on their ports, and says which port was reached. The sagas are stopped: a stopped service must
+# answer 503 while the others keep working (norm §5.6.3). identity-audit answers too, for the routes of the logo and the images.
 docker build -q -t "$RUN_ID-stub" tests/stub >/dev/null || { echo "the stub service did not build"; exit 1; }
 docker run -d --name "$RUN_ID-stub" --network "$RUN_ID" \
   --network-alias multi-tour-security \
   --network-alias multi-tour-commercial-reservation-api \
   --network-alias multi-tour-operations-cost-api \
   --network-alias multi-tour-cash-reporting-api \
+  --network-alias multi-tour-identity-audit-api \
   "$RUN_ID-stub" >/dev/null || exit 1
 docker run -d --name "$RUN_ID" --network "$RUN_ID" -e ALLOWED_ORIGIN="$ORIGIN" -p 127.0.0.1::8080 "$RUN_ID" >/dev/null || exit 1
 PORT=$(docker port "$RUN_ID" 8080/tcp | head -n 1 | sed 's/.*://')
@@ -109,7 +110,7 @@ has    "smoke·body_over_limit_uses_the_envelope" '"error":"PAYLOAD_TOO_LARGE"' 
 # ---- the routes (T-04)
 AUTH='Authorization: Bearer smoke'
 UP="$BASE/api/v1/security/accounts"
-DOWN="$BASE/api/v1/identity-audit/tenants"
+DOWN="$BASE/api/v1/sagas/onboard-tenant"
 status "smoke·protected_route_without_token_is_401" 401 "$DOWN"
 has    "smoke·the_401_uses_the_envelope" '"error":"UNAUTHORIZED"' "$DOWN"
 has    "smoke·the_401_carries_the_headers" 'Cache-Control: no-store' "$DOWN"
@@ -132,6 +133,82 @@ for saga in onboard-tenant register-payment execute-refund cancel-departure chan
   status "smoke·saga_${saga}_needs_a_credential" 401 -X POST "$BASE/api/v1/sagas/$saga"
   status "smoke·saga_${saga}_is_routed" 503 -X POST -H "$AUTH" "$BASE/api/v1/sagas/$saga"
 done
+# HU-COM-002 / HU-COM-006: the promotional image of an association is public and cacheable, never no-store
+# (ADR-005 E6; contract commercial-reservation.yaml). The stub sends `Cache-Control: public`, as the service does.
+CR="$BASE/api/v1/commercial-reservation"
+IMG="$CR/public/tenants/acme/associated-establishments/a1/image"
+status "smoke·public_association_image_passes_without_token" 200 "$IMG"
+has    "smoke·public_association_image_keeps_the_cache_header_of_the_service" 'Cache-Control: public' "$IMG"
+lacks  "smoke·public_association_image_is_not_no_store" 'no-store' "$IMG"
+has    "smoke·public_association_image_keeps_the_security_headers" 'X-Content-Type-Options: nosniff' "$IMG"
+has    "smoke·public_association_image_keeps_the_correlation_id" 'X-Correlation-Id: [A-Za-z0-9]' "$IMG"
+lacks  "smoke·public_association_image_does_not_repeat_the_service_correlation_id" 'from-the-service' "$IMG"
+# only that route is the exception: the other public reads and look-alike paths keep no-store
+has    "smoke·other_public_reads_stay_no_store" 'Cache-Control: no-store' "$CR/public/tenants/acme/tours"
+has    "smoke·a_look_alike_image_path_stays_no_store" 'Cache-Control: no-store' "$CR/public/tenants/acme/associated-establishments/a1/image/extra"
+has    "smoke·an_image_name_on_another_resource_stays_no_store" 'Cache-Control: no-store' "$CR/public/tenants/acme/tours/t1/image"
+# the upload of an image (800 KB, HU-COM-002 RNF-03) fits the 1 MB body limit of the gateway
+head -c 819200 /dev/zero > "$TMP/image.bin"
+IMAGE="$TMP/image.bin"
+command -v cygpath >/dev/null 2>&1 && IMAGE=$(cygpath -m "$IMAGE")
+status "smoke·an_800kb_image_upload_is_accepted" 200 -X POST -H "$AUTH" -H 'Content-Type: application/octet-stream' --data-binary "@$IMAGE" "$CR/associated-establishments"
+# HU-COM-009: the proof upload (one route) takes up to 6 MB; everywhere else the limit stays 1 MB (ADR-004 D10, ADR-005 E6)
+head -c 5242880 /dev/zero > "$TMP/proof5.bin"
+head -c 6400000 /dev/zero > "$TMP/proof7.bin"
+PROOF5="$TMP/proof5.bin"; PROOF7="$TMP/proof7.bin"
+command -v cygpath >/dev/null 2>&1 && { PROOF5=$(cygpath -m "$PROOF5"); PROOF7=$(cygpath -m "$PROOF7"); }
+CR="$BASE/api/v1/commercial-reservation"
+PAY="$CR/reservations/3f2a1c9e/payments"
+MP='Content-Type: multipart/form-data; boundary=smoke'
+status "smoke·proof_upload_of_5mb_is_forwarded" 200 -X POST -H "$AUTH" -H "$MP" -H 'Idempotency-Key: k-1' --data-binary "@$PROOF5" "$PAY"
+status "smoke·proof_upload_above_6mb_is_413" 413 -X POST -H "$AUTH" -H "$MP" --data-binary "@$PROOF7" "$PAY"
+has    "smoke·proof_upload_413_uses_the_envelope" '"error":"PAYLOAD_TOO_LARGE"' -X POST -H "$AUTH" -H "$MP" --data-binary "@$PROOF7" "$PAY"
+has    "smoke·proof_upload_413_carries_the_headers" 'Cache-Control: no-store' -X POST -H "$AUTH" -H "$MP" --data-binary "@$PROOF7" "$PAY"
+status "smoke·proof_upload_needs_a_credential" 401 -X POST -H "$MP" --data-binary "@$PROOF5" "$PAY"
+has    "smoke·proof_upload_carries_the_security_headers" 'X-Content-Type-Options: nosniff' -X POST -H "$AUTH" -H "$MP" --data-binary "@$PROOF5" "$PAY"
+has    "smoke·proof_upload_carries_the_cors_grant" "Access-Control-Allow-Origin: $ORIGIN" -X POST -H "Origin: $ORIGIN" -H "$AUTH" -H "$MP" --data-binary "@$PROOF5" "$PAY"
+has    "smoke·proof_upload_is_not_cached" 'Cache-Control: no-store' -X POST -H "$AUTH" -H "$MP" --data-binary "@$PROOF5" "$PAY"
+status "smoke·the_list_of_payments_still_works" 200 -H "$AUTH" "$PAY"
+status "smoke·5mb_on_the_reservations_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$CR/reservations"
+status "smoke·5mb_on_a_look_alike_path_with_a_segment_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$PAY/extra"
+status "smoke·5mb_on_a_payment_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$PAY/p1"
+status "smoke·5mb_on_a_nested_payments_path_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$CR/reservations/r1/x/payments"
+status "smoke·5mb_on_a_path_parameter_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$CR/reservations/r1;x=1/payments"
+status "smoke·5mb_on_a_payments_prefix_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$CR/reservations/r1/paymentsX"
+status "smoke·5mb_on_another_domain_is_413" 413 -X POST -H "$AUTH" --data-binary "@$PROOF5" "$BASE/api/v1/cash-reporting/reservations/r1/payments"
+# HU-IDA-005: the logo and the commercial images of a tenant. A file of 1 MB in base64 is about 1.4 MB of JSON, so the two routes that
+# receive one take up to 2 MB (the service itself refuses above 1.5 MB); everywhere else the limit stays 1 MB
+head -c 1572864 /dev/zero > "$TMP/file15.bin"
+head -c 2200000 /dev/zero > "$TMP/file22.bin"
+FILE15="$TMP/file15.bin"; FILE22="$TMP/file22.bin"
+command -v cygpath >/dev/null 2>&1 && { FILE15=$(cygpath -m "$FILE15"); FILE22=$(cygpath -m "$FILE22"); }
+IA="$BASE/api/v1/identity-audit"
+JSON='Content-Type: application/json'
+status "smoke·a_logo_body_of_1_5mb_is_forwarded" 200 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/logo"
+status "smoke·an_image_body_of_1_5mb_is_forwarded" 200 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/images/2"
+status "smoke·a_file_body_above_2mb_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE22" "$IA/tenant/images/2"
+has    "smoke·a_file_body_above_2mb_uses_the_envelope" '"error":"PAYLOAD_TOO_LARGE"' -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE22" "$IA/tenant/logo"
+status "smoke·the_file_route_needs_a_credential" 401 -X PUT -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/logo"
+has    "smoke·the_file_route_carries_the_security_headers" 'X-Content-Type-Options: nosniff' -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/logo"
+has    "smoke·the_file_route_carries_the_cors_grant" "Access-Control-Allow-Origin: $ORIGIN" -X PUT -H "Origin: $ORIGIN" -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/logo"
+status "smoke·1_5mb_on_another_tenant_route_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/visual-identity"
+status "smoke·1_5mb_on_a_logo_look_alike_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/logo/extra"
+status "smoke·1_5mb_on_an_image_with_a_name_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/images/x"
+status "smoke·1_5mb_on_an_image_with_a_segment_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/images/1/extra"
+status "smoke·1_5mb_on_an_image_with_a_path_parameter_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$IA/tenant/images/1;x=1"
+status "smoke·1_5mb_on_another_domain_is_413" 413 -X PUT -H "$AUTH" -H "$JSON" --data-binary "@$FILE15" "$BASE/api/v1/operations-cost/tenant/logo"
+# the public files of a tenant are shown before sign-in and must be cacheable, never no-store (api spec 012, RN-IDA-API-125)
+LOGO="$IA/public/tenants/acme/logo"
+status "smoke·public_logo_passes_without_token" 200 "$LOGO"
+has    "smoke·public_logo_keeps_the_cache_header_of_the_service" 'Cache-Control: public' "$LOGO"
+lacks  "smoke·public_logo_is_not_no_store" 'no-store' "$LOGO"
+has    "smoke·public_logo_keeps_the_security_headers" 'X-Content-Type-Options: nosniff' "$LOGO"
+has    "smoke·public_image_keeps_the_cache_header_of_the_service" 'Cache-Control: public' "$IA/public/tenants/acme/images/1"
+lacks  "smoke·public_image_is_not_no_store" 'no-store' "$IA/public/tenants/acme/images/1"
+# only those two routes are the exception: the profile and look-alike paths keep no-store
+has    "smoke·the_public_profile_stays_no_store" 'Cache-Control: no-store' "$IA/public/tenants/acme"
+has    "smoke·a_look_alike_logo_path_stays_no_store" 'Cache-Control: no-store' "$IA/public/tenants/acme/logo/extra"
+has    "smoke·a_look_alike_image_path_stays_no_store" 'Cache-Control: no-store' "$IA/public/tenants/acme/images/1/extra"
 status "smoke·internal_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/internal/anything"
 status "smoke·internal_with_a_path_parameter_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/internal;x=1/anything"
 status "smoke·internal_in_capitals_is_404" 404 -H "$AUTH" "$BASE/api/v1/security/INTERNAL/anything"
@@ -148,17 +225,29 @@ status "smoke·root_without_the_front_is_503" 503 "$BASE/"
 has    "smoke·the_root_503_uses_the_envelope" '"error":"SERVICE_UNAVAILABLE"' "$BASE/portals/identity-audit/remoteEntry.json"
 # A portal that is not running answers the 503 envelope on its own module, with no credential asked, and
 # the other routes keep answering (the area of that portal is the only one that goes down).
-for p in identity-audit operations-cost commercial-reservation; do
+for p in identity-audit operations-cost commercial-reservation cash-reporting; do
   status "smoke·portal_${p}_module_down_is_503" 503 "$BASE/portals/${p}-portal.js"
   has    "smoke·portal_${p}_503_uses_the_envelope" '"error":"SERVICE_UNAVAILABLE"' "$BASE/portals/${p}-portal.css"
+done
+# every portal has its own route file that points at its own container (a portal missing here would be served by the front and answer 404 once it runs)
+for p in identity-audit operations-cost commercial-reservation cash-reporting; do
+  if grep -q "http://[a-z-]*-portal:" "nginx/routes/portal-${p}.conf" 2>/dev/null; then pass "smoke·portal_${p}_has_its_own_route"; else miss "smoke·portal_${p}_has_its_own_route" "nginx/routes/portal-${p}.conf"; fi
+done
+# the module of each portal is asked as /portals/<portal>.{js,css} and each container serves it under its own name: a route without a
+# rewrite sends the path unchanged and the container answers its welcome page with 200 (the front then fails to import it)
+for p in identity-audit operations-cost commercial-reservation cash-reporting; do
+  if grep -q "rewrite " "nginx/routes/portal-${p}.conf" 2>/dev/null; then pass "smoke·portal_${p}_rewrites_the_module_path"; else miss "smoke·portal_${p}_rewrites_the_module_path" "nginx/routes/portal-${p}.conf"; fi
 done
 status "smoke·unknown_api_path_is_404_not_the_front" 404 -H "$AUTH" "$BASE/api/nope"
 status "smoke·api_without_token_is_still_401" 401 "$DOWN"
 # a saga may outlast the 70 s bound of the workflow, so its read timeout is 90 s
-for saga in onboard-tenant register-payment execute-refund cancel-departure change-departure-vehicles; do
+for saga in onboard-tenant register-payment execute-refund cancel-departure; do
   t=$(awk -v s="$saga" 'index($0, "sagas/" s) && /location/ {f=1} f && /proxy_read_timeout/ {print $2; exit}' nginx/routes/sagas.conf)
   if [ "$t" = "90s;" ]; then pass "smoke·saga_${saga}_waits_90s"; else miss "smoke·saga_${saga}_waits_90s" "found: $t"; fi
 done
+# the saga of the vehicles runs up to 130 s inside the request (HU-WFL-005), so it waits 150 s
+t=$(awk 'index($0, "sagas/change-departure-vehicles") && /location/ {f=1} f && /proxy_read_timeout/ {print $2; exit}' nginx/routes/sagas.conf)
+if [ "$t" = "150s;" ]; then pass "smoke·saga_change-departure-vehicles_waits_150s"; else miss "smoke·saga_change-departure-vehicles_waits_150s" "found: $t"; fi
 docker run -d --name "$RUN_ID-front" --network "$RUN_ID" --network-alias multi-tour-front "$RUN_ID-stub" >/dev/null || exit 1
 # above the 10 s the resolver keeps the failed lookup of the front (valid=10s)
 sleep 13
